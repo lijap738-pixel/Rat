@@ -1,0 +1,422 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny everything by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- GLOBAL HARDENED HELPERS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isValidOptionalString(data, key, maxLen) {
+      return !(key in data) || data[key] == null || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    // --- VALIDATION BLUEPRINTS ---
+
+    function isValidFamily(data) {
+      return data.parentUid is string && data.parentUid.size() >= 1 && data.parentUid.size() <= 128 &&
+             data.parentName is string && data.parentName.size() >= 1 && data.parentName.size() <= 80 &&
+             isValidOptionalString(data, 'parentEmail', 120) &&
+             data.maxDevices is int && data.maxDevices == 10 &&
+             data.deviceCount is int && data.deviceCount >= 0 && data.deviceCount <= 10;
+    }
+
+    function isValidPairingCode(data) {
+      return data.code is string && data.code.size() >= 6 && data.code.size() <= 12 && data.code.matches('^[A-Z0-9]+$') &&
+             isValidId(data.familyId) &&
+             isValidId(data.parentUid) &&
+             data.deviceLabel is string && data.deviceLabel.size() >= 1 && data.deviceLabel.size() <= 60 &&
+             data.status in ['pending', 'claimed', 'revoked'] &&
+             isValidOptionalString(data, 'claimedByUid', 128) &&
+             isValidOptionalString(data, 'claimedDeviceId', 128) &&
+             data.expiresAt is timestamp;
+    }
+
+    function isValidDevice(data) {
+      return isValidId(data.familyId) &&
+             isValidId(data.parentUid) &&
+             isValidId(data.childUid) &&
+             data.deviceName is string && data.deviceName.size() >= 1 && data.deviceName.size() <= 60 &&
+             data.deviceModel is string && data.deviceModel.size() >= 1 && data.deviceModel.size() <= 80 &&
+             data.osVersion is string && data.osVersion.size() >= 1 && data.osVersion.size() <= 30 &&
+             data.pairingCode is string && data.pairingCode.size() >= 6 && data.pairingCode.size() <= 12 &&
+             data.batteryLevel is int && data.batteryLevel >= 0 && data.batteryLevel <= 100 &&
+             data.isCharging is bool &&
+             data.isOnline is bool &&
+             data.locationConsentEnabled is bool &&
+             (!('latitude' in data) || data.latitude == null || data.latitude is number) &&
+             (!('longitude' in data) || data.longitude == null || data.longitude is number) &&
+             isValidOptionalString(data, 'locationLabel', 120) &&
+             data.dailyScreenTimeMinutes is int && data.dailyScreenTimeMinutes >= 0 && data.dailyScreenTimeMinutes <= 1440 &&
+             data.screenTimeLimitMinutes is int && data.screenTimeLimitMinutes >= 15 && data.screenTimeLimitMinutes <= 1440 &&
+             data.appUsageSummary is list && data.appUsageSummary.size() <= 10 &&
+             (data.appUsageSummary.size() == 0 || data.appUsageSummary[0] is string) &&
+             data.activeSessionType in ['none', 'camera', 'microphone', 'screen'] &&
+             data.lastActiveAt is timestamp;
+    }
+
+    function isValidPairedLink(data) {
+      return isValidId(data.userId) &&
+             isValidId(data.familyId) &&
+             isValidId(data.deviceId) &&
+             data.deviceName is string && data.deviceName.size() >= 1 && data.deviceName.size() <= 60 &&
+             data.parentName is string && data.parentName.size() >= 1 && data.parentName.size() <= 80 &&
+             data.role in ['parent', 'child'];
+    }
+
+    function isValidSession(data) {
+      return isValidId(data.familyId) &&
+             isValidId(data.parentUid) &&
+             isValidId(data.childUid) &&
+             isValidId(data.deviceId) &&
+             data.deviceName is string && data.deviceName.size() >= 1 && data.deviceName.size() <= 60 &&
+             data.sessionType in ['camera', 'microphone', 'screen'] &&
+             data.status in ['requested', 'active', 'declined', 'ended', 'expired'] &&
+             data.encryptionFingerprint is string && data.encryptionFingerprint.size() >= 8 && data.encryptionFingerprint.size() <= 64 &&
+             isValidOptionalString(data, 'sdpOffer', 20000) &&
+             isValidOptionalString(data, 'sdpAnswer', 20000) &&
+             data.iceCandidates is list && data.iceCandidates.size() <= 30 &&
+             (data.iceCandidates.size() == 0 || data.iceCandidates[0] is string) &&
+             isValidOptionalString(data, 'previewFrameBase64', 120000) &&
+             data.audioLevelDb is int && data.audioLevelDb >= 0 && data.audioLevelDb <= 100 &&
+             data.requestedDurationMinutes is int && data.requestedDurationMinutes >= 1 && data.requestedDurationMinutes <= 30 &&
+             data.expiresAt is timestamp &&
+             isValidOptionalString(data, 'endedReason', 80);
+    }
+
+    function isValidSharedFile(data) {
+      return isValidId(data.familyId) &&
+             isValidId(data.parentUid) &&
+             isValidId(data.childUid) &&
+             isValidId(data.deviceId) &&
+             isValidId(data.uploadedByUid) &&
+             data.uploaderRole in ['parent', 'child'] &&
+             data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 120 &&
+             data.mimeType is string && data.mimeType.size() >= 1 && data.mimeType.size() <= 80 &&
+             data.sizeBytes is int && data.sizeBytes >= 0 &&
+             data.category in ['photo', 'video', 'document'] &&
+             data.consentGranted is bool && data.consentGranted == true &&
+             isValidOptionalString(data, 'thumbnailBase64', 120000) &&
+             isValidOptionalString(data, 'textPreview', 8000) &&
+             isValidOptionalString(data, 'localUriString', 500);
+    }
+
+    function isValidAuditLog(data) {
+      return isValidId(data.familyId) &&
+             isValidId(data.actorUid) &&
+             data.actorRole in ['parent', 'child', 'system'] &&
+             isValidId(data.childUid) &&
+             isValidId(data.deviceId) &&
+             data.deviceName is string && data.deviceName.size() >= 1 && data.deviceName.size() <= 60 &&
+             data.eventType is string && data.eventType.size() >= 1 && data.eventType.size() <= 50 &&
+             data.details is string && data.details.size() >= 1 && data.details.size() <= 300;
+    }
+
+    // --- COLLECTION RULES ---
+
+    match /families/{familyId} {
+      allow get: if isSignedIn() && isValidId(familyId) && request.auth.uid == familyId;
+      allow list: if isSignedIn() && existing().parentUid == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       isValidId(familyId) &&
+                       request.auth.uid == familyId &&
+                       incoming().parentUid == request.auth.uid &&
+                       incoming().keys().hasAll(['parentUid', 'parentName', 'maxDevices', 'deviceCount', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['parentUid', 'parentName', 'parentEmail', 'maxDevices', 'deviceCount', 'createdAt', 'updatedAt']) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       isValidFamily(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(familyId) &&
+                       isValidFamily(incoming()) &&
+                       incoming().parentUid == existing().parentUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       (
+                         (request.auth.uid == familyId &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['parentName', 'parentEmail', 'deviceCount', 'updatedAt'])) ||
+                         (incoming().deviceCount == existing().deviceCount + 1 &&
+                          incoming().deviceCount <= 10 &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['deviceCount', 'updatedAt']))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(familyId) && request.auth.uid == familyId;
+
+      // Child devices subcollection (max 10 enforced by family deviceCount)
+      match /devices/{deviceId} {
+        allow get: if isSignedIn() && isValidId(deviceId) && (request.auth.uid == familyId || existing().childUid == request.auth.uid);
+        allow list: if isSignedIn() && (request.auth.uid == familyId || existing().childUid == request.auth.uid);
+
+        allow create: if isSignedIn() &&
+                         isValidId(deviceId) &&
+                         isValidDevice(incoming()) &&
+                         incoming().familyId == familyId &&
+                         incoming().parentUid == familyId &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().keys().hasAll([
+                           'familyId', 'parentUid', 'childUid', 'deviceName', 'deviceModel', 'osVersion',
+                           'pairingCode', 'batteryLevel', 'isCharging', 'isOnline', 'locationConsentEnabled',
+                           'dailyScreenTimeMinutes', 'screenTimeLimitMinutes', 'appUsageSummary',
+                           'activeSessionType', 'lastActiveAt', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'familyId', 'parentUid', 'childUid', 'deviceName', 'deviceModel', 'osVersion',
+                           'pairingCode', 'batteryLevel', 'isCharging', 'isOnline', 'locationConsentEnabled',
+                           'latitude', 'longitude', 'locationLabel', 'dailyScreenTimeMinutes',
+                           'screenTimeLimitMinutes', 'appUsageSummary', 'activeSessionType',
+                           'lastActiveAt', 'createdAt', 'updatedAt'
+                         ]) &&
+                         (
+                           (request.auth.uid == familyId &&
+                            get(/databases/$(database)/documents/families/$(familyId)).data.deviceCount < 10) ||
+                           (incoming().childUid == request.auth.uid &&
+                            exists(/databases/$(database)/documents/pairing_codes/$(incoming().pairingCode)) &&
+                            get(/databases/$(database)/documents/pairing_codes/$(incoming().pairingCode)).data.familyId == familyId &&
+                            get(/databases/$(database)/documents/pairing_codes/$(incoming().pairingCode)).data.status == 'pending' &&
+                            get(/databases/$(database)/documents/families/$(familyId)).data.deviceCount < 10)
+                         );
+
+        allow update: if isSignedIn() &&
+                         isValidId(deviceId) &&
+                         isValidDevice(incoming()) &&
+                         incoming().familyId == existing().familyId &&
+                         incoming().parentUid == existing().parentUid &&
+                         incoming().childUid == existing().childUid &&
+                         incoming().pairingCode == existing().pairingCode &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         (
+                           (request.auth.uid == familyId &&
+                            incoming().diff(existing()).affectedKeys().hasOnly([
+                              'deviceName', 'screenTimeLimitMinutes', 'activeSessionType', 'isOnline', 'updatedAt'
+                            ])) ||
+                           (request.auth.uid == existing().childUid &&
+                            incoming().diff(existing()).affectedKeys().hasOnly([
+                              'batteryLevel', 'isCharging', 'isOnline', 'locationConsentEnabled',
+                              'latitude', 'longitude', 'locationLabel', 'dailyScreenTimeMinutes',
+                              'appUsageSummary', 'activeSessionType', 'lastActiveAt', 'updatedAt'
+                            ]))
+                         );
+
+        allow delete: if isSignedIn() && isValidId(deviceId) && request.auth.uid == familyId;
+      }
+
+      // Live Camera, Microphone, and Screen Mirroring sessions (consent + WebRTC signaling)
+      match /sessions/{sessionId} {
+        allow get: if isSignedIn() && isValidId(sessionId) && (request.auth.uid == familyId || existing().childUid == request.auth.uid);
+        allow list: if isSignedIn() && (request.auth.uid == familyId || existing().childUid == request.auth.uid);
+
+        allow create: if isSignedIn() &&
+                         isValidId(sessionId) &&
+                         isValidSession(incoming()) &&
+                         request.auth.uid == familyId &&
+                         incoming().familyId == familyId &&
+                         incoming().parentUid == familyId &&
+                         incoming().status == 'requested' &&
+                         exists(/databases/$(database)/documents/families/$(familyId)/devices/$(incoming().deviceId)) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().keys().hasAll([
+                           'familyId', 'parentUid', 'childUid', 'deviceId', 'deviceName', 'sessionType',
+                           'status', 'encryptionFingerprint', 'iceCandidates', 'audioLevelDb',
+                           'requestedDurationMinutes', 'expiresAt', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'familyId', 'parentUid', 'childUid', 'deviceId', 'deviceName', 'sessionType',
+                           'status', 'encryptionFingerprint', 'sdpOffer', 'sdpAnswer', 'iceCandidates',
+                           'previewFrameBase64', 'audioLevelDb', 'requestedDurationMinutes',
+                           'expiresAt', 'endedReason', 'createdAt', 'updatedAt'
+                         ]);
+
+        allow update: if isSignedIn() &&
+                         isValidId(sessionId) &&
+                         isValidSession(incoming()) &&
+                         incoming().familyId == existing().familyId &&
+                         incoming().parentUid == existing().parentUid &&
+                         incoming().childUid == existing().childUid &&
+                         incoming().deviceId == existing().deviceId &&
+                         incoming().sessionType == existing().sessionType &&
+                         incoming().encryptionFingerprint == existing().encryptionFingerprint &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         !(existing().status in ['declined', 'ended', 'expired']) &&
+                         (
+                           (request.auth.uid == familyId &&
+                            incoming().diff(existing()).affectedKeys().hasOnly([
+                              'status', 'sdpOffer', 'iceCandidates', 'endedReason', 'updatedAt'
+                            ])) ||
+                           (request.auth.uid == existing().childUid &&
+                            incoming().diff(existing()).affectedKeys().hasOnly([
+                              'status', 'sdpAnswer', 'iceCandidates', 'previewFrameBase64',
+                              'audioLevelDb', 'endedReason', 'updatedAt'
+                            ]))
+                         );
+
+        allow delete: if isSignedIn() && isValidId(sessionId) && request.auth.uid == familyId;
+      }
+
+      // Permission-based SAF & Photo Picker shared files
+      match /shared_files/{fileId} {
+        allow get: if isSignedIn() && isValidId(fileId) && (request.auth.uid == familyId || existing().childUid == request.auth.uid);
+        allow list: if isSignedIn() && (request.auth.uid == familyId || existing().childUid == request.auth.uid);
+
+        allow create: if isSignedIn() &&
+                         isValidId(fileId) &&
+                         isValidSharedFile(incoming()) &&
+                         incoming().familyId == familyId &&
+                         incoming().parentUid == familyId &&
+                         incoming().uploadedByUid == request.auth.uid &&
+                         (request.auth.uid == familyId || incoming().childUid == request.auth.uid) &&
+                         exists(/databases/$(database)/documents/families/$(familyId)/devices/$(incoming().deviceId)) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().keys().hasAll([
+                           'familyId', 'parentUid', 'childUid', 'deviceId', 'uploadedByUid',
+                           'uploaderRole', 'fileName', 'mimeType', 'sizeBytes', 'category',
+                           'consentGranted', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'familyId', 'parentUid', 'childUid', 'deviceId', 'uploadedByUid',
+                           'uploaderRole', 'fileName', 'mimeType', 'sizeBytes', 'category',
+                           'consentGranted', 'thumbnailBase64', 'textPreview', 'localUriString',
+                           'createdAt', 'updatedAt'
+                         ]);
+
+        allow update: if isSignedIn() &&
+                         isValidId(fileId) &&
+                         isValidSharedFile(incoming()) &&
+                         (request.auth.uid == familyId || existing().childUid == request.auth.uid) &&
+                         incoming().familyId == existing().familyId &&
+                         incoming().createdAt == existing().createdAt &&
+                         isValidTimestamp(incoming().updatedAt) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['consentGranted', 'updatedAt']);
+
+        allow delete: if isSignedIn() && isValidId(fileId) && (request.auth.uid == familyId || existing().childUid == request.auth.uid);
+      }
+
+      // Append-only immutable audit logs
+      match /audit_logs/{logId} {
+        allow get: if isSignedIn() && isValidId(logId) && (request.auth.uid == familyId || existing().childUid == request.auth.uid);
+        allow list: if isSignedIn() && (request.auth.uid == familyId || existing().childUid == request.auth.uid);
+
+        allow create: if isSignedIn() &&
+                         isValidId(logId) &&
+                         isValidAuditLog(incoming()) &&
+                         incoming().familyId == familyId &&
+                         incoming().actorUid == request.auth.uid &&
+                         (request.auth.uid == familyId || incoming().childUid == request.auth.uid) &&
+                         isValidTimestamp(incoming().createdAt) &&
+                         incoming().keys().hasAll([
+                           'familyId', 'actorUid', 'actorRole', 'childUid', 'deviceId',
+                           'deviceName', 'eventType', 'details', 'createdAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'familyId', 'actorUid', 'actorRole', 'childUid', 'deviceId',
+                           'deviceName', 'eventType', 'details', 'createdAt'
+                         ]);
+
+        allow update, delete: if false;
+      }
+    }
+
+    // Pairing codes (single get allowed for signed-in child with exact secret code; list only by parent owner)
+    match /pairing_codes/{code} {
+      allow get: if isSignedIn() && isValidId(code);
+      allow list: if isSignedIn() && existing().parentUid == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       isValidId(code) &&
+                       isValidPairingCode(incoming()) &&
+                       incoming().code == code &&
+                       incoming().parentUid == request.auth.uid &&
+                       incoming().familyId == request.auth.uid &&
+                       incoming().status == 'pending' &&
+                       exists(/databases/$(database)/documents/families/$(incoming().familyId)) &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().keys().hasAll([
+                         'code', 'familyId', 'parentUid', 'deviceLabel', 'status',
+                         'expiresAt', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'code', 'familyId', 'parentUid', 'deviceLabel', 'status',
+                         'claimedByUid', 'claimedDeviceId', 'expiresAt', 'createdAt', 'updatedAt'
+                       ]);
+
+      allow update: if isSignedIn() &&
+                       isValidId(code) &&
+                       isValidPairingCode(incoming()) &&
+                       incoming().code == existing().code &&
+                       incoming().parentUid == existing().parentUid &&
+                       incoming().familyId == existing().familyId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       (
+                         (request.auth.uid == existing().parentUid &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])) ||
+                         (existing().status == 'pending' &&
+                          incoming().status == 'claimed' &&
+                          incoming().claimedByUid == request.auth.uid &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'status', 'claimedByUid', 'claimedDeviceId', 'updatedAt'
+                          ]))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(code) && existing().parentUid == request.auth.uid;
+    }
+
+    // Private user-scoped paired device bookmarks
+    match /users/{userId}/paired_links/{linkId} {
+      allow get, list: if isSignedIn() && request.auth.uid == userId;
+
+      allow create: if isSignedIn() &&
+                       isValidId(linkId) &&
+                       request.auth.uid == userId &&
+                       isValidPairedLink(incoming()) &&
+                       incoming().userId == userId &&
+                       isValidTimestamp(incoming().createdAt) &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().keys().hasAll([
+                         'userId', 'familyId', 'deviceId', 'deviceName', 'parentName', 'role', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'familyId', 'deviceId', 'deviceName', 'parentName', 'role', 'createdAt', 'updatedAt'
+                       ]);
+
+      allow update: if isSignedIn() &&
+                       isValidId(linkId) &&
+                       request.auth.uid == userId &&
+                       isValidPairedLink(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       isValidTimestamp(incoming().updatedAt) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['deviceName', 'parentName', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(linkId) && request.auth.uid == userId;
+    }
+  }
+}

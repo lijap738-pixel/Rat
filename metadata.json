@@ -1,0 +1,6 @@
+{
+  "name": "SafeNest",
+  "description": "Consent-based parental control and family device safety application with Parent and Child modes, live WebRTC camera/audio/screen sessions, SAF file access, and audit logging.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
